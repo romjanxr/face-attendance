@@ -1,0 +1,14 @@
+services:
+  web:
+    build: .
+    container_name: face-attendance-dev
+    volumes:
+      - .:/app  # Mount source code
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+    command: python manage.py runserver 0.0.0.0:8000
+    devices:
+      - "/dev/video0:/dev/video0"  # Access webcam device

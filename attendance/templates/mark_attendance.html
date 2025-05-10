@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Mark Attendance</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f4f4f4;
+            text-align: center;
+        }
+
+        h1 {
+            color: #333;
+            margin-top: 20px;
+        }
+
+        #video-container {
+            display: block;
+            margin: 20px auto;
+            width: 640px;
+            height: 480px;
+            border: 2px solid #666;
+            background-color: #ccc;
+            position: relative; /* Needed for overlaying the canvas */
+        }
+
+        #video-element {
+            width: 100%;
+            height: 100%;
+            display: block; /* Important: Removes extra space below video */
+        }
+
+        #face-canvas {
+            position: absolute; /* Overlay the video */
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* Allows clicks to go through to video */
+            z-index: 2;
+        }
+
+
+        #attendance-table {
+            margin: 20px auto;
+            border-collapse: collapse;
+            width: 80%;
+            max-width: 800px;
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        #attendance-table th,
+        #attendance-table td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }
+
+        #attendance-table th {
+            background-color: #4CAF50;
+            color: white;
+        }
+
+        #attendance-table tbody tr:nth-child(even) {
+            background-color: #f2f2f2;
+        }
+
+        #attendance-table tbody tr:hover {
+            background-color: #ddd;
+        }
+
+        .face-name-display {
+            position: absolute;
+            color: white;
+            font-size: 16px;
+            font-weight: bold;
+            background-color: rgba(0, 255, 0, 0.7); /* Green background */
+            padding: 2px 5px;
+            border-radius: 3px;
+            z-index: 3; /* Ensure the name is above the rectangle */
+            white-space: nowrap; /* Prevent text wrapping */
+        }
+    </style>
+</head>
+<body>
+    <h1>Mark Attendance</h1>
+    <div id="video-container">
+        <video id="video-element" autoplay playsinline></video>
+        <canvas id="face-canvas"></canvas>
+    </div>
+
+    <table id="attendance-table">
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Time</th>
+                <th>Student Name</th>
+                <th>Roll Number</th>
+                <th>Latest Attendance</th>
+            </tr>
+        </thead>
+        <tbody id="attendance-table-body">
+            {% for record in student_attendance_list %}
+            <tr data-student-id="{{ record.student.id }}">
+                <td>{{ record.date }}</td>
+                <td>{{ record.time }}</td>
+                <td>{{ record.student.name }}</td>
+                <td>{{ record.student.roll_number }}</td>
+                <td id="attendance-status-{{ record.student.id }}">{{ record.latest_attendance }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <script>
+        const videoElement = document.getElementById('video-element');
+        const faceCanvas = document.getElementById('face-canvas');
+        const faceContext = faceCanvas.getContext('2d');
+        const FPS = 30; // Frames per second
+        let isProcessing = false; // Flag to prevent multiple simultaneous requests
+        let detectedFaces = []; // Array to store detected face data (name, location)
+        let previousAttendanceData = {}; // Store previous attendance data as a map, keyed by student ID
+        let updateTableInterval; // Variable to hold the interval ID
+        let students = []; // Array to store student data
+        let initialLoad = true;
+        let retries = 0;
+        const MAX_RETRIES = 5;
+
+
+        // Get video stream
+        async function getVideoStream() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                videoElement.srcObject = stream;
+            } catch (err) {
+                console.error('Error accessing the camera:', err);
+                alert('Failed to access the camera. Please make sure it is connected and allowed.');
+            }
+        }
+
+
+
+        // Function to send frame to Django backend for processing
+        function processVideoFrame() {
+            if (!isProcessing) {
+                isProcessing = true;
+                faceCanvas.width = videoElement.videoWidth;
+                faceCanvas.height = videoElement.videoHeight;
+                faceContext.drawImage(videoElement, 0, 0, faceCanvas.width, faceCanvas.height);
+
+                const frameDataUrl = faceCanvas.toDataURL('image/jpeg'); // Get JPEG data URL
+
+
+                fetch('/mark/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': getCookie('csrftoken'), // Function to get CSRF token
+                    },
+                    body: JSON.stringify({ frame: frameDataUrl }),
+                })
+                .then(response => response.json())
+                .then(data => {
+                    isProcessing = false;
+                    if (data.status === 'success') {
+                         detectedFaces = data.detected_faces; // Get face locations
+                         displayDetectedFaces();
+                         updateAttendanceStatus(data.attendance_data); //update the table
+                         retries = 0; // Reset retries on success
+                    } else if (data.status === 'error'){
+                        console.error('Error from backend:', data.message);
+                        if (retries < MAX_RETRIES) {
+                            console.log(`Retrying frame processing (${retries + 1}/${MAX_RETRIES})...`);
+                            setTimeout(processVideoFrame, 1000); // Retry after 1 second
+                            retries++;
+                        } else {
+                             console.error("Max retries reached.  Stopping frame processing.");
+                        }
+                    }
+                    // Handle the response from the server (e.g., update UI)
+                    // console.log(data);
+                })
+                .catch(error => {
+                    isProcessing = false;
+                    console.error('Error sending frame to server:', error);
+                     if (retries < MAX_RETRIES) {
+                        console.log(`Retrying frame processing (${retries + 1}/${MAX_RETRIES})...`);
+                        setTimeout(processVideoFrame, 1000); // Retry after 1 second
+                        retries++;
+                    } else {
+                         console.error("Max retries reached.  Stopping frame processing.");
+                    }
+                });
+            }
+        }
+
+        function getCookie(name) {
+            let cookieValue = null;
+            if (document.cookie && document.cookie !== '') {
+                const cookies = document.cookie.split(';');
+                for (let i = 0; i < cookies.length; i++) {
+                    const cookie = cookies[i].trim();
+                    // Does this cookie string begin with the name we want?
+                    if (cookie.startsWith(name + '=')) {
+                        cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                        break;
+                    }
+                }
+            }
+            return cookieValue;
+        }
+
+        function formatTime(timeString) {
+            if (!timeString) {
+                return ''; // Handle null or empty input
+            }
+
+            // Check if the time string contains milliseconds
+            const timeParts = timeString.split('.');
+            let hours, minutes, seconds;
+
+            if (timeParts.length > 1) {
+                // Time string includes milliseconds
+                const hms = timeParts[0].split(':');
+                if(hms.length === 3){
+                    hours = parseInt(hms[0], 10);
+                    minutes = parseInt(hms[1], 10);
+                    seconds = parseInt(hms[2], 10);
+                }
+                else{
+                    return 'Invalid Time';
+                }
+
+            } else {
+                // Time string without milliseconds
+                 const hms = timeString.split(':');
+                 if(hms.length === 3){
+                    hours = parseInt(hms[0], 10);
+                    minutes = parseInt(hms[1], 10);
+                    seconds = parseInt(hms[2], 10);
+                 }
+                 else if (hms.length === 2){
+                    hours = parseInt(hms[0], 10);
+                    minutes = parseInt(hms[1], 10);
+                    seconds = 0;
+                 }
+                 else{
+                    return 'Invalid Time';
+                 }
+            }
+           if (isNaN(hours) || isNaN(minutes) || isNaN(seconds)) {
+                return 'Invalid Time';
+            }
+
+            const ampm = hours >= 12 ? 'pm' : 'am';
+            const formattedHours = hours % 12 === 0 ? 12 : hours % 12;
+            return `${formattedHours}:${minutes.toString().padStart(2, '0')} ${ampm}`;
+        }
+
+
+
+        function updateAttendanceTable(attendanceData) {
+            const attendanceTableBody = document.getElementById('attendance-table-body');
+            let tableHTML = '';
+
+            // Convert previousAttendanceData to a map for efficient lookup
+            let existingAttendanceMap = {};
+            let hasUpdates = false;
+
+            if (previousAttendanceData) {
+                for (let record of previousAttendanceData) {
+                    existingAttendanceMap[record.student.id] = {
+                        latest_attendance: record.latest_attendance,
+                        date: record.date,
+                        time: record.time,
+                        name: record.student.name,
+                        roll_number: record.student.roll_number
+                    };
+                }
+            }
+
+
+            if (attendanceData) {
+                attendanceData.forEach(record => {
+                    const formattedTime = record.time ? formatTime(record.time) : '';
+                    let latestAttendance = record.latest_attendance;
+                    const studentId = record.student.id;
+
+                    if (existingAttendanceMap[studentId]) {
+                        if (existingAttendanceMap[studentId].latest_attendance !== latestAttendance) {
+                            hasUpdates = true;
+                            alert("CHANGE DETECTED! Student ID: " + studentId + ", Old Attendance: " + existingAttendanceMap[studentId].latest_attendance + ", New Attendance: " + latestAttendance);
+                        }
+                        existingAttendanceMap[studentId].latest_attendance = latestAttendance;
+                        existingAttendanceMap[studentId].date = record.date;
+                        existingAttendanceMap[studentId].time = formattedTime;
+
+                    } else {
+                        hasUpdates = true;
+                        alert("NEW STUDENT DETECTED! Student ID: " + studentId + ",  Attendance: " + latestAttendance);
+                        existingAttendanceMap[studentId] = {
+                            latest_attendance: latestAttendance,
+                            date: record.date,
+                            time: formattedTime,
+                            name: record.student.name,
+                            roll_number: record.student.roll_number
+                        };
+                    }
+                });
+                tableHTML = Object.entries(existingAttendanceMap)
+                    .map(([studentId, studentData]) => {
+                        return `
+                            <tr data-student-id="${studentId}">
+                                <td>${studentData.date || ''}</td>
+                                <td>${studentData.time}</td>
+                                <td>${studentData.name}</td>
+                                <td>${studentData.roll_number}</td>
+                                <td id="attendance-status-${studentId}">${studentData.latest_attendance}</td>
+                            </tr>
+                        `;
+                    })
+                    .join('');
+                attendanceTableBody.innerHTML = tableHTML;
+                previousAttendanceData = attendanceData;
+
+            }
+            else if (initialLoad) {
+                fetch('/attendance_table/')
+                    .then(response => response.json())
+                    .then(data => {
+                        const attendanceTableBody = document.getElementById('attendance-table-body');
+                        let tableHTML = '';
+                        let newStudents = data.student_attendance_list; // Get the new student data
+
+                        if (data && newStudents) {
+                            newStudents.forEach(record => {
+                                const formattedTime = record.time ? formatTime(record.time) : '';
+                                const studentId = record.student.id;
+                                existingAttendanceMap[studentId] = {
+                                    latest_attendance: record.latest_attendance,
+                                    date: record.date,
+                                    time: formattedTime,
+                                    name: record.student.name,
+                                    roll_number: record.student.roll_number
+                                };
+                            });
+                            tableHTML = Object.entries(existingAttendanceMap)
+                                .map(([studentId, studentData]) => {
+                                    return `
+                                        <tr data-student-id="${studentId}">
+                                            <td>${studentData.date || ''}</td>
+                                            <td>${studentData.time}</td>
+                                            <td>${studentData.name}</td>
+                                            <td>${studentData.roll_number}</td>
+                                            <td id="attendance-status-${studentId}">${studentData.latest_attendance}</td>
+                                        </tr>
+                                    `;
+                                })
+                                .join('');
+                            attendanceTableBody.innerHTML = tableHTML;
+                            previousAttendanceData = newStudents;
+                            students = newStudents;
+                            initialLoad = false;
+                        }
+                        else {
+                            console.error("Error: Could not find attendance table data");
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error fetching attendance table:', error);
+                    });
+            }
+        }
+
+
+        function displayDetectedFaces() {
+            const videoContainer = document.getElementById('video-container');
+            const canvas = document.getElementById('face-canvas');
+            const context = canvas.getContext('2d');
+            context.clearRect(0, 0, canvas.width, canvas.height); // Clear the ENTIRE canvas
+
+            // Remove existing face name displays before adding new ones
+            const existingFaceNames = document.getElementsByClassName('face-name-display');
+            while (existingFaceNames.length > 0) {
+                existingFaceNames[0].parentNode.removeChild(existingFaceNames[0]);
+            }
+
+            // Display the detected face names
+            detectedFaces.forEach((face) => {
+                const { name, top, right, bottom, left } = face;
+
+                // Draw rectangle
+                context.strokeStyle = '#00FF00'; // Green
+                context.lineWidth = 2;
+                context.beginPath();
+                context.rect(left, top, right - left, bottom - top);
+                context.stroke();
+
+                // Draw name tag
+                const faceNameDisplay = document.createElement('div');
+                faceNameDisplay.className = 'face-name-display';
+                faceNameDisplay.textContent = name;
+                faceNameDisplay.style.position = 'absolute';
+                faceNameDisplay.style.color = 'white';
+                faceNameDisplay.style.fontSize = '16px';
+                faceNameDisplay.style.fontWeight = 'bold';
+                faceNameDisplay.style.backgroundColor = 'rgba(0, 255, 0, 0.7)'; // Green background
+                faceNameDisplay.style.padding = '2px 5px';
+                faceNameDisplay.style.borderRadius = '3px';
+                faceNameDisplay.style.top = `${bottom + 5}px`; // Position below the rectangle
+                faceNameDisplay.style.left = `${left}px`;
+                videoContainer.appendChild(faceNameDisplay);
+            });
+        }
+
+        function updateAttendanceStatus(attendanceData) {
+            if (attendanceData && attendanceData.length > 0) {
+                updateAttendanceTable(attendanceData);
+            }
+            else{
+                updateAttendanceTable();
+            }
+
+        }
+
+
+        // Start the video stream and set up frame processing
+        getVideoStream();
+        videoElement.addEventListener('loadedmetadata', () => {
+            setInterval(processVideoFrame, 1000 / FPS);
+        });
+
+        // Fetch and update the attendance table more frequently
+        updateTableInterval = setInterval(updateAttendanceTable, 1000); // Check every 1 seconds
+        updateAttendanceTable(); // Initial call to populate the table
+    </script>
+
+</body>
+</html>
